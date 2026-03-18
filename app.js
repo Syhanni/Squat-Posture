@@ -4,12 +4,19 @@ const ctx = canvas.getContext('2d');
 const btnStart = document.getElementById('btn-start');
 const btnStop = document.getElementById('btn-stop');
 const statusText = document.getElementById('status-text');
+const statusDot = document.getElementById('status-dot');
 const repCountEl = document.getElementById('rep-count');
 const kneeAngleEl = document.getElementById('knee-angle');
 const hipAngleEl = document.getElementById('hip-angle');
 const formScoreEl = document.getElementById('form-score');
-const feedbackList = document.getElementById('feedback-list');
+const feedbackRoll = document.getElementById('feedback-roll');
 const depthBar = document.getElementById('depth-bar');
+const landing = document.getElementById('landing');
+const tracker = document.getElementById('tracker');
+const btnHistory = document.getElementById('btn-history');
+const historyPanel = document.getElementById('history-panel');
+const btnCloseHistory = document.getElementById('btn-close-history');
+const historyList = document.getElementById('history-list');
 
 // Pose detection state
 let detector = null;
@@ -18,29 +25,30 @@ let stream = null;
 
 // Squat tracking state
 let repCount = 0;
-let squatPhase = 'standing'; // standing | descending | bottom | ascending
+let squatPhase = 'standing';
 let minKneeAngle = 180;
 let frameHistory = [];
 const HISTORY_SIZE = 10;
 
+// Per-rep feedback accumulator
+let currentRepFeedback = [];
+let repHistory = []; // Array of { rep, formRating, minDepthAngle, feedback[] }
+
+// Rolling feedback log (recent items shown on screen)
+const MAX_ROLL_ITEMS = 8;
+let rollItems = [];
+
 // Keypoint indices for MoveNet
 const KEYPOINTS = {
   NOSE: 0,
-  LEFT_SHOULDER: 5,
-  RIGHT_SHOULDER: 6,
-  LEFT_ELBOW: 7,
-  RIGHT_ELBOW: 8,
-  LEFT_WRIST: 9,
-  RIGHT_WRIST: 10,
-  LEFT_HIP: 11,
-  RIGHT_HIP: 12,
-  LEFT_KNEE: 13,
-  RIGHT_KNEE: 14,
-  LEFT_ANKLE: 15,
-  RIGHT_ANKLE: 16,
+  LEFT_SHOULDER: 5, RIGHT_SHOULDER: 6,
+  LEFT_ELBOW: 7, RIGHT_ELBOW: 8,
+  LEFT_WRIST: 9, RIGHT_WRIST: 10,
+  LEFT_HIP: 11, RIGHT_HIP: 12,
+  LEFT_KNEE: 13, RIGHT_KNEE: 14,
+  LEFT_ANKLE: 15, RIGHT_ANKLE: 16,
 };
 
-// Skeleton connections for drawing
 const SKELETON_CONNECTIONS = [
   [KEYPOINTS.LEFT_SHOULDER, KEYPOINTS.RIGHT_SHOULDER],
   [KEYPOINTS.LEFT_SHOULDER, KEYPOINTS.LEFT_ELBOW],
@@ -56,76 +64,118 @@ const SKELETON_CONNECTIONS = [
   [KEYPOINTS.RIGHT_KNEE, KEYPOINTS.RIGHT_ANKLE],
 ];
 
-// Colors for skeleton
 const COLORS = {
   skeleton: '#00ff88',
-  joint: '#ff3366',
   jointGood: '#00ff88',
   jointWarn: '#ffaa00',
   jointBad: '#ff3366',
-  text: '#ffffff',
 };
 
-// ---- Utility functions ----
+// ---- Utility ----
 
 function angle(a, b, c) {
-  const radians =
-    Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
-  let deg = Math.abs((radians * 180) / Math.PI);
+  const rad = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
+  let deg = Math.abs((rad * 180) / Math.PI);
   if (deg > 180) deg = 360 - deg;
   return deg;
 }
 
-function midpoint(a, b) {
-  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+function kp2xy(kp) { return { x: kp.x, y: kp.y }; }
+function isOk(kp, t = 0.3) { return kp.score >= t; }
+
+// ---- Rolling feedback ----
+
+function addRollItem(text, type) {
+  const now = new Date();
+  const ts = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  rollItems.push({ text, type, ts });
+  if (rollItems.length > MAX_ROLL_ITEMS) rollItems.shift();
+  renderRoll();
 }
 
-function keypointToXY(kp) {
-  return { x: kp.x, y: kp.y };
+function renderRoll() {
+  feedbackRoll.innerHTML = rollItems
+    .map((item, i) => {
+      const opacity = 0.4 + 0.6 * ((i + 1) / rollItems.length);
+      return `<div class="roll-item roll-${item.type}" style="opacity:${opacity}">
+        <span class="roll-ts">${item.ts}</span> ${item.text}
+      </div>`;
+    })
+    .join('');
+  feedbackRoll.scrollTop = feedbackRoll.scrollHeight;
 }
 
-function isConfident(kp, threshold = 0.3) {
-  return kp.score >= threshold;
+// ---- Rep history ----
+
+function saveRepHistory(formRating) {
+  // Deduplicate feedback messages for this rep
+  const seen = new Set();
+  const unique = currentRepFeedback.filter((f) => {
+    if (seen.has(f.text)) return false;
+    seen.add(f.text);
+    return true;
+  });
+
+  const entry = {
+    rep: repCount,
+    formRating,
+    minDepthAngle: Math.round(minKneeAngle),
+    feedback: unique,
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+  };
+  repHistory.push(entry);
+  currentRepFeedback = [];
+  renderHistory();
+
+  addRollItem(`Rep #${repCount} complete — ${formRating}`, formRating === 'Good' ? 'good' : formRating === 'Fair' ? 'warn' : 'bad');
 }
 
-// ---- Drawing functions ----
+function renderHistory() {
+  if (repHistory.length === 0) {
+    historyList.innerHTML = '<p class="history-empty">Complete a squat to see feedback here.</p>';
+    return;
+  }
+  historyList.innerHTML = repHistory
+    .slice()
+    .reverse()
+    .map((entry) => {
+      const depthLabel = entry.minDepthAngle < 70 ? 'Deep' : entry.minDepthAngle < 100 ? 'Parallel' : 'Shallow';
+      const feedbackHtml = entry.feedback.length > 0
+        ? entry.feedback.map((f) => `<div class="hist-fb hist-fb-${f.type}">${f.text}</div>`).join('')
+        : '<div class="hist-fb hist-fb-good">No issues detected</div>';
+      return `<div class="hist-entry hist-entry-${entry.formRating.toLowerCase()}">
+        <div class="hist-header">
+          <span class="hist-rep">Rep #${entry.rep}</span>
+          <span class="hist-rating hist-rating-${entry.formRating.toLowerCase()}">${entry.formRating}</span>
+          <span class="hist-time">${entry.time}</span>
+        </div>
+        <div class="hist-meta">Depth: ${depthLabel} (${entry.minDepthAngle}°)</div>
+        <div class="hist-feedback">${feedbackHtml}</div>
+      </div>`;
+    })
+    .join('');
+}
 
-function drawSkeleton(keypoints, formIssues) {
-  // Draw connections
+// ---- Drawing ----
+
+function drawSkeleton(keypoints, issues) {
   for (const [i, j] of SKELETON_CONNECTIONS) {
-    const kpA = keypoints[i];
-    const kpB = keypoints[j];
-    if (!isConfident(kpA) || !isConfident(kpB)) continue;
-
+    const a = keypoints[i], b = keypoints[j];
+    if (!isOk(a) || !isOk(b)) continue;
     ctx.beginPath();
-    ctx.moveTo(kpA.x, kpA.y);
-    ctx.lineTo(kpB.x, kpB.y);
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
     ctx.strokeStyle = COLORS.skeleton;
     ctx.lineWidth = 3;
     ctx.stroke();
   }
 
-  // Draw keypoints
   for (let i = 0; i < keypoints.length; i++) {
     const kp = keypoints[i];
-    if (!isConfident(kp)) continue;
-
+    if (!isOk(kp)) continue;
     let color = COLORS.jointGood;
-
-    // Color knees/hips based on form
-    if (
-      (i === KEYPOINTS.LEFT_KNEE || i === KEYPOINTS.RIGHT_KNEE) &&
-      formIssues.kneeIssue
-    ) {
-      color = COLORS.jointBad;
-    }
-    if (
-      (i === KEYPOINTS.LEFT_HIP || i === KEYPOINTS.RIGHT_HIP) &&
-      formIssues.hipIssue
-    ) {
-      color = COLORS.jointWarn;
-    }
-
+    if ((i === KEYPOINTS.LEFT_KNEE || i === KEYPOINTS.RIGHT_KNEE) && issues.kneeIssue) color = COLORS.jointBad;
+    if ((i === KEYPOINTS.LEFT_HIP || i === KEYPOINTS.RIGHT_HIP) && issues.hipIssue) color = COLORS.jointWarn;
     ctx.beginPath();
     ctx.arc(kp.x, kp.y, 6, 0, 2 * Math.PI);
     ctx.fillStyle = color;
@@ -136,15 +186,11 @@ function drawSkeleton(keypoints, formIssues) {
   }
 }
 
-function drawAngleArc(vertex, pointA, pointC, angleDeg, label, color) {
-  if (!vertex || !pointA || !pointC) return;
-
+function drawAngleLabel(vertex, angleDeg, label, color) {
+  if (!vertex) return;
   ctx.save();
   ctx.font = 'bold 14px monospace';
   ctx.fillStyle = color;
-  ctx.strokeStyle = color;
-
-  // Draw angle text near the vertex
   const offsetX = vertex.x > canvas.width / 2 ? -60 : 10;
   ctx.fillText(`${label}: ${Math.round(angleDeg)}°`, vertex.x + offsetX, vertex.y - 15);
   ctx.restore();
@@ -152,53 +198,47 @@ function drawAngleArc(vertex, pointA, pointC, angleDeg, label, color) {
 
 // ---- Form analysis ----
 
+let lastFormRating = 'Good'; // Track across frames for rep save
+
 function analyzeForm(keypoints) {
   const feedback = [];
   const issues = { kneeIssue: false, hipIssue: false };
   let formRating = 'Good';
 
-  const lHip = keypoints[KEYPOINTS.LEFT_HIP];
-  const rHip = keypoints[KEYPOINTS.RIGHT_HIP];
-  const lKnee = keypoints[KEYPOINTS.LEFT_KNEE];
-  const rKnee = keypoints[KEYPOINTS.RIGHT_KNEE];
-  const lAnkle = keypoints[KEYPOINTS.LEFT_ANKLE];
-  const rAnkle = keypoints[KEYPOINTS.RIGHT_ANKLE];
-  const lShoulder = keypoints[KEYPOINTS.LEFT_SHOULDER];
-  const rShoulder = keypoints[KEYPOINTS.RIGHT_SHOULDER];
+  const lHip = keypoints[KEYPOINTS.LEFT_HIP], rHip = keypoints[KEYPOINTS.RIGHT_HIP];
+  const lKnee = keypoints[KEYPOINTS.LEFT_KNEE], rKnee = keypoints[KEYPOINTS.RIGHT_KNEE];
+  const lAnkle = keypoints[KEYPOINTS.LEFT_ANKLE], rAnkle = keypoints[KEYPOINTS.RIGHT_ANKLE];
+  const lShoulder = keypoints[KEYPOINTS.LEFT_SHOULDER], rShoulder = keypoints[KEYPOINTS.RIGHT_SHOULDER];
 
-  // Use whichever side is more confident
-  const useLeft =
-    (lHip.score + lKnee.score + lAnkle.score) >=
-    (rHip.score + rKnee.score + rAnkle.score);
-
+  const useLeft = (lHip.score + lKnee.score + lAnkle.score) >= (rHip.score + rKnee.score + rAnkle.score);
   const hip = useLeft ? lHip : rHip;
   const knee = useLeft ? lKnee : rKnee;
   const ankle = useLeft ? lAnkle : rAnkle;
   const shoulder = useLeft ? lShoulder : rShoulder;
 
-  if (!isConfident(hip) || !isConfident(knee) || !isConfident(ankle)) {
-    return { kneeAngle: null, hipAngle: null, feedback: ['Move so your full body is visible.'], issues, formRating: '--', depth: 0 };
+  if (!isOk(hip) || !isOk(knee) || !isOk(ankle)) {
+    return { kneeAngle: null, hipAngle: null, feedback: [], issues, formRating: '--', depth: 0 };
   }
 
-  // Calculate angles
-  const kneeAngle = angle(keypointToXY(hip), keypointToXY(knee), keypointToXY(ankle));
+  const kneeAngle = angle(kp2xy(hip), kp2xy(knee), kp2xy(ankle));
   let hipAngle = null;
-  if (isConfident(shoulder)) {
-    hipAngle = angle(keypointToXY(shoulder), keypointToXY(hip), keypointToXY(knee));
+  if (isOk(shoulder)) {
+    hipAngle = angle(kp2xy(shoulder), kp2xy(hip), kp2xy(knee));
   }
 
-  // Depth as percentage (180° = 0%, 60° = 100%)
   const depth = Math.max(0, Math.min(100, ((180 - kneeAngle) / 120) * 100));
 
-  // --- Squat phase detection and rep counting ---
+  // Phase detection
   frameHistory.push(kneeAngle);
   if (frameHistory.length > HISTORY_SIZE) frameHistory.shift();
-
   const avgAngle = frameHistory.reduce((a, b) => a + b, 0) / frameHistory.length;
 
   if (squatPhase === 'standing' && avgAngle < 150) {
     squatPhase = 'descending';
     minKneeAngle = avgAngle;
+    currentRepFeedback = [];
+    lastFormRating = 'Good';
+    addRollItem('Squat started', 'info');
   } else if (squatPhase === 'descending') {
     if (avgAngle < minKneeAngle) minKneeAngle = avgAngle;
     if (avgAngle < 110) squatPhase = 'bottom';
@@ -206,68 +246,82 @@ function analyzeForm(keypoints) {
     if (avgAngle < minKneeAngle) minKneeAngle = avgAngle;
     if (avgAngle > 130) squatPhase = 'ascending';
   } else if (squatPhase === 'ascending' && avgAngle > 160) {
-    // Rep completed
     if (minKneeAngle < 120) {
       repCount++;
       repCountEl.textContent = repCount;
+      saveRepHistory(lastFormRating);
     }
     squatPhase = 'standing';
     minKneeAngle = 180;
   }
 
-  // --- Form checks ---
-
-  // 1. Knee cave check: knees should stay over ankles
-  if (isConfident(lKnee) && isConfident(rKnee) && isConfident(lAnkle) && isConfident(rAnkle)) {
-    const kneeWidth = Math.abs(lKnee.x - rKnee.x);
-    const ankleWidth = Math.abs(lAnkle.x - rAnkle.x);
-    if (kneeWidth < ankleWidth * 0.75 && kneeAngle < 140) {
-      feedback.push({ text: 'Knees caving inward — push knees out over toes.', type: 'warn' });
+  // Form checks
+  if (isOk(lKnee) && isOk(rKnee) && isOk(lAnkle) && isOk(rAnkle)) {
+    const kneeW = Math.abs(lKnee.x - rKnee.x);
+    const ankleW = Math.abs(lAnkle.x - rAnkle.x);
+    if (kneeW < ankleW * 0.75 && kneeAngle < 140) {
+      feedback.push({ text: 'Knees caving inward — push knees out', type: 'warn' });
       issues.kneeIssue = true;
       formRating = 'Fair';
     }
   }
 
-  // 2. Forward lean check
-  if (isConfident(shoulder) && kneeAngle < 140) {
-    const torsoLean = shoulder.x - hip.x;
-    const legRef = Math.abs(hip.y - ankle.y);
-    if (Math.abs(torsoLean) > legRef * 0.5) {
-      feedback.push({ text: 'Excessive forward lean — keep chest up.', type: 'warn' });
+  if (isOk(shoulder) && kneeAngle < 140) {
+    const lean = shoulder.x - hip.x;
+    const ref = Math.abs(hip.y - ankle.y);
+    if (Math.abs(lean) > ref * 0.5) {
+      feedback.push({ text: 'Excessive forward lean — chest up', type: 'warn' });
       issues.hipIssue = true;
       formRating = 'Fair';
     }
   }
 
-  // 3. Depth feedback
   if (squatPhase === 'bottom' || squatPhase === 'ascending') {
     if (minKneeAngle > 120) {
-      feedback.push({ text: 'Try to squat deeper — aim for thighs parallel to ground.', type: 'info' });
+      feedback.push({ text: 'Go deeper — aim for parallel', type: 'info' });
     } else if (minKneeAngle < 70) {
-      feedback.push({ text: 'Great depth! Watch that your lower back stays neutral.', type: 'info' });
+      feedback.push({ text: 'Great depth — keep lower back neutral', type: 'info' });
     }
   }
 
-  // 4. Knee over toe (lateral view)
-  if (kneeAngle < 140 && isConfident(knee) && isConfident(ankle)) {
-    const kneeForward = knee.x - ankle.x;
-    const shinLength = Math.abs(knee.y - ankle.y);
-    if (Math.abs(kneeForward) > shinLength * 0.8) {
-      feedback.push({ text: 'Knees traveling too far forward — sit back more.', type: 'warn' });
+  if (kneeAngle < 140 && isOk(knee) && isOk(ankle)) {
+    const fwd = knee.x - ankle.x;
+    const shin = Math.abs(knee.y - ankle.y);
+    if (Math.abs(fwd) > shin * 0.8) {
+      feedback.push({ text: 'Knees too far forward — sit back more', type: 'warn' });
       issues.kneeIssue = true;
       if (formRating === 'Good') formRating = 'Fair';
     }
   }
 
   if (feedback.length === 0 && squatPhase !== 'standing') {
-    feedback.push({ text: 'Form looks good! Keep it up.', type: 'good' });
-  } else if (squatPhase === 'standing' && feedback.length === 0) {
-    feedback.push({ text: 'Ready — perform a squat to get feedback.', type: 'info' });
+    feedback.push({ text: 'Form looks good!', type: 'good' });
   }
 
-  // Check for multiple warnings
   const warns = feedback.filter((f) => f.type === 'warn').length;
   if (warns >= 2) formRating = 'Poor';
+
+  // Accumulate feedback for current rep
+  if (squatPhase !== 'standing') {
+    for (const f of feedback) {
+      if (f.type === 'warn' || f.type === 'info') {
+        currentRepFeedback.push(f);
+      }
+    }
+    // Track worst rating for this rep
+    if (formRating === 'Poor') lastFormRating = 'Poor';
+    else if (formRating === 'Fair' && lastFormRating !== 'Poor') lastFormRating = 'Fair';
+  }
+
+  // Push new warnings to the rolling feed (throttled — only if not already the latest)
+  for (const f of feedback) {
+    if (f.type === 'warn') {
+      const last = rollItems[rollItems.length - 1];
+      if (!last || last.text !== f.text) {
+        addRollItem(f.text, 'warn');
+      }
+    }
+  }
 
   return { kneeAngle, hipAngle, feedback, issues, formRating, depth };
 }
@@ -280,81 +334,84 @@ async function detect() {
     return;
   }
 
+  // Resize canvas to fill screen
+  if (canvas.width !== window.innerWidth || canvas.height !== window.innerHeight) {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+
   const poses = await detector.estimatePoses(video);
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  // Draw video scaled to fill canvas (cover)
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const cw = canvas.width, ch = canvas.height;
+  const scale = Math.max(cw / vw, ch / vh);
+  const sw = vw * scale, sh = vh * scale;
+  const ox = (cw - sw) / 2, oy = (ch - sh) / 2;
+  ctx.drawImage(video, ox, oy, sw, sh);
 
   if (poses.length > 0) {
     const keypoints = poses[0].keypoints;
-
-    // Scale keypoints to canvas
-    const scaleX = canvas.width / video.videoWidth;
-    const scaleY = canvas.height / video.videoHeight;
+    const sx = scale;
+    const sy = scale;
     for (const kp of keypoints) {
-      kp.x *= scaleX;
-      kp.y *= scaleY;
+      kp.x = kp.x * sx + ox;
+      kp.y = kp.y * sy + oy;
     }
 
     const analysis = analyzeForm(keypoints);
     drawSkeleton(keypoints, analysis.issues);
 
-    // Draw angle arcs
-    const useLeft =
-      (keypoints[KEYPOINTS.LEFT_HIP].score + keypoints[KEYPOINTS.LEFT_KNEE].score) >=
+    const useLeft = (keypoints[KEYPOINTS.LEFT_HIP].score + keypoints[KEYPOINTS.LEFT_KNEE].score) >=
       (keypoints[KEYPOINTS.RIGHT_HIP].score + keypoints[KEYPOINTS.RIGHT_KNEE].score);
-
     const hip = keypoints[useLeft ? KEYPOINTS.LEFT_HIP : KEYPOINTS.RIGHT_HIP];
     const knee = keypoints[useLeft ? KEYPOINTS.LEFT_KNEE : KEYPOINTS.RIGHT_KNEE];
     const ankle = keypoints[useLeft ? KEYPOINTS.LEFT_ANKLE : KEYPOINTS.RIGHT_ANKLE];
     const shoulder = keypoints[useLeft ? KEYPOINTS.LEFT_SHOULDER : KEYPOINTS.RIGHT_SHOULDER];
 
     if (analysis.kneeAngle !== null) {
-      drawAngleArc(keypointToXY(knee), keypointToXY(hip), keypointToXY(ankle), analysis.kneeAngle, 'Knee', '#00ff88');
+      drawAngleLabel(kp2xy(knee), analysis.kneeAngle, 'Knee', '#00ff88');
       kneeAngleEl.textContent = `${Math.round(analysis.kneeAngle)}°`;
     }
     if (analysis.hipAngle !== null) {
-      drawAngleArc(keypointToXY(hip), keypointToXY(shoulder), keypointToXY(knee), analysis.hipAngle, 'Hip', '#44aaff');
+      drawAngleLabel(kp2xy(hip), analysis.hipAngle, 'Hip', '#44aaff');
       hipAngleEl.textContent = `${Math.round(analysis.hipAngle)}°`;
     }
 
-    // Update form score with color
     formScoreEl.textContent = analysis.formRating;
-    formScoreEl.className = 'stat-value form-' + analysis.formRating.toLowerCase();
+    formScoreEl.className = 'hud-value form-' + analysis.formRating.toLowerCase();
 
-    // Update depth bar
     depthBar.style.height = `${analysis.depth}%`;
-    if (analysis.depth > 70) {
-      depthBar.className = 'depth-bar depth-deep';
-    } else if (analysis.depth > 40) {
-      depthBar.className = 'depth-bar depth-parallel';
-    } else {
-      depthBar.className = 'depth-bar depth-standing';
-    }
+    depthBar.className = 'hud-depth-bar' +
+      (analysis.depth > 70 ? ' depth-deep' : analysis.depth > 40 ? ' depth-parallel' : ' depth-standing');
 
-    // Update feedback
-    if (analysis.feedback.length > 0) {
-      feedbackList.innerHTML = analysis.feedback
-        .map((f) => `<li class="feedback-item ${f.type}">${f.text}</li>`)
-        .join('');
-    }
-
-    // Update status
-    const phaseLabels = {
-      standing: 'Standing',
-      descending: 'Going Down',
-      bottom: 'At Bottom',
-      ascending: 'Coming Up',
-    };
+    const phaseLabels = { standing: 'Standing', descending: 'Going Down', bottom: 'At Bottom', ascending: 'Coming Up' };
     statusText.textContent = phaseLabels[squatPhase] || 'Tracking';
+    statusDot.className = 'status-dot active';
   } else {
     statusText.textContent = 'No person detected';
+    statusDot.className = 'status-dot';
   }
 
   animationId = requestAnimationFrame(detect);
 }
 
-// ---- Camera and model setup ----
+// ---- Fullscreen helpers ----
+
+function enterFullscreen() {
+  const el = document.documentElement;
+  if (el.requestFullscreen) el.requestFullscreen();
+  else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+}
+
+function exitFullscreen() {
+  if (document.exitFullscreen) document.exitFullscreen();
+  else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+}
+
+// ---- Camera & model ----
 
 async function initDetector() {
   statusText.textContent = 'Loading AI model...';
@@ -365,48 +422,79 @@ async function initDetector() {
   statusText.textContent = 'Model loaded';
 }
 
-async function startCamera() {
+async function startSession() {
   try {
+    // Switch to tracker view
+    landing.classList.add('hidden');
+    tracker.classList.remove('hidden');
+
+    enterFullscreen();
+
     statusText.textContent = 'Requesting camera...';
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 640, height: 480, facingMode: 'user' },
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
       audio: false,
     });
     video.srcObject = stream;
     await video.play();
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
 
     if (!detector) await initDetector();
 
-    statusText.textContent = 'Tracking active';
+    statusText.textContent = 'Tracking';
+    statusDot.className = 'status-dot active';
     animationId = requestAnimationFrame(detect);
-
-    btnStart.disabled = true;
-    btnStop.disabled = false;
   } catch (err) {
-    statusText.textContent = `Camera error: ${err.message}`;
+    statusText.textContent = `Error: ${err.message}`;
     console.error(err);
   }
 }
 
-function stopCamera() {
-  if (animationId) {
-    cancelAnimationFrame(animationId);
-    animationId = null;
-  }
-  if (stream) {
-    stream.getTracks().forEach((t) => t.stop());
-    stream = null;
-  }
+function stopSession() {
+  if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
   video.srcObject = null;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  btnStart.disabled = false;
-  btnStop.disabled = true;
-  statusText.textContent = 'Stopped';
+  exitFullscreen();
+
+  tracker.classList.add('hidden');
+  landing.classList.remove('hidden');
+
+  // Reset state
+  repCount = 0;
+  squatPhase = 'standing';
+  minKneeAngle = 180;
+  frameHistory = [];
+  currentRepFeedback = [];
+  repHistory = [];
+  rollItems = [];
+  lastFormRating = 'Good';
+  repCountEl.textContent = '0';
+  kneeAngleEl.textContent = '--°';
+  hipAngleEl.textContent = '--°';
+  formScoreEl.textContent = '--';
+  feedbackRoll.innerHTML = '';
+  historyList.innerHTML = '<p class="history-empty">Complete a squat to see feedback here.</p>';
 }
 
-btnStart.addEventListener('click', startCamera);
-btnStop.addEventListener('click', stopCamera);
+// Also stop if user exits fullscreen manually
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && tracker.classList.contains('hidden') === false) {
+    // User exited fullscreen — keep tracking but don't force back
+  }
+});
+
+// ---- Event listeners ----
+
+btnStart.addEventListener('click', startSession);
+btnStop.addEventListener('click', stopSession);
+
+btnHistory.addEventListener('click', () => {
+  historyPanel.classList.toggle('hidden');
+});
+btnCloseHistory.addEventListener('click', () => {
+  historyPanel.classList.add('hidden');
+});

@@ -7,70 +7,70 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div id="app">
-    <header>
+  <!-- Landing screen -->
+  <div id="landing">
+    <div class="landing-content">
       <h1>Squat Form Tracker</h1>
       <p class="subtitle">Real-time pose estimation &amp; form analysis</p>
-    </header>
+      <button id="btn-start" class="btn btn-primary btn-large">Start</button>
+      <p class="hint">Opens fullscreen with camera tracking</p>
+    </div>
+  </div>
 
-    <main>
-      <div class="video-container">
-        <video id="video" playsinline></video>
-        <canvas id="canvas"></canvas>
-        <div id="status-overlay" class="status-overlay">
-          <span id="status-text">Click Start to begin</span>
-        </div>
+  <!-- Fullscreen tracking view -->
+  <div id="tracker" class="hidden">
+    <video id="video" playsinline></video>
+    <canvas id="canvas"></canvas>
+
+    <!-- Top bar overlay -->
+    <div class="overlay-top">
+      <div class="overlay-status">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-text">Loading...</span>
       </div>
+      <button id="btn-stop" class="btn btn-stop-overlay">Exit</button>
+    </div>
 
-      <div class="controls">
-        <button id="btn-start" class="btn btn-primary">Start Camera</button>
-        <button id="btn-stop" class="btn btn-danger" disabled>Stop</button>
+    <!-- Stats overlay (bottom-left) -->
+    <div class="overlay-stats">
+      <div class="hud-stat">
+        <span class="hud-label">Reps</span>
+        <span class="hud-value" id="rep-count">0</span>
       </div>
-
-      <div class="dashboard">
-        <div class="stats-grid">
-          <div class="stat-card">
-            <div class="stat-label">Reps</div>
-            <div class="stat-value" id="rep-count">0</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Knee Angle</div>
-            <div class="stat-value" id="knee-angle">--°</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Hip Angle</div>
-            <div class="stat-value" id="hip-angle">--°</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Form</div>
-            <div class="stat-value" id="form-score">--</div>
-          </div>
-        </div>
-
-        <div class="feedback-panel">
-          <h3>Form Feedback</h3>
-          <ul id="feedback-list">
-            <li class="feedback-item info">Start your camera and perform a squat to get feedback.</li>
-          </ul>
-        </div>
-
-        <div class="depth-indicator">
-          <h3>Squat Depth</h3>
-          <div class="depth-bar-container">
-            <div class="depth-bar" id="depth-bar"></div>
-            <div class="depth-labels">
-              <span>Standing</span>
-              <span>Parallel</span>
-              <span>Deep</span>
-            </div>
-          </div>
-        </div>
+      <div class="hud-stat">
+        <span class="hud-label">Knee</span>
+        <span class="hud-value" id="knee-angle">--°</span>
       </div>
-    </main>
+      <div class="hud-stat">
+        <span class="hud-label">Hip</span>
+        <span class="hud-value" id="hip-angle">--°</span>
+      </div>
+      <div class="hud-stat">
+        <span class="hud-label">Form</span>
+        <span class="hud-value" id="form-score">--</span>
+      </div>
+      <div class="hud-depth">
+        <div class="hud-depth-bar" id="depth-bar"></div>
+      </div>
+    </div>
 
-    <footer>
-      <p>Powered by TensorFlow.js MoveNet &middot; All processing happens locally in your browser</p>
-    </footer>
+    <!-- Rolling feedback overlay (right side) -->
+    <div class="overlay-feedback">
+      <div class="feedback-header">Live Feedback</div>
+      <div id="feedback-roll" class="feedback-roll"></div>
+    </div>
+
+    <!-- Rep history panel (slides in from right) -->
+    <button id="btn-history" class="btn-history-toggle">History</button>
+    <div id="history-panel" class="history-panel hidden">
+      <div class="history-header">
+        <h3>Rep History</h3>
+        <button id="btn-close-history" class="btn-close-history">&times;</button>
+      </div>
+      <div id="history-list" class="history-list">
+        <p class="history-empty">Complete a squat to see feedback here.</p>
+      </div>
+    </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
