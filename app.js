@@ -11,6 +11,7 @@ const hipAngleEl = document.getElementById('hip-angle');
 const formScoreEl = document.getElementById('form-score');
 const feedbackRoll = document.getElementById('feedback-roll');
 const depthBar = document.getElementById('depth-bar');
+const formBorder = document.getElementById('form-border');
 const landing = document.getElementById('landing');
 const tracker = document.getElementById('tracker');
 const btnHistory = document.getElementById('btn-history');
@@ -383,6 +384,10 @@ async function detect() {
     formScoreEl.textContent = analysis.formRating;
     formScoreEl.className = 'hud-value form-' + analysis.formRating.toLowerCase();
 
+    // Update form indicator border
+    const borderMap = { Good: 'border-good', Fair: 'border-fair', Poor: 'border-poor' };
+    formBorder.className = 'form-border ' + (borderMap[analysis.formRating] || 'border-none');
+
     depthBar.style.height = `${analysis.depth}%`;
     depthBar.className = 'hud-depth-bar' +
       (analysis.depth > 70 ? ' depth-deep' : analysis.depth > 40 ? ' depth-parallel' : ' depth-standing');
@@ -393,6 +398,7 @@ async function detect() {
   } else {
     statusText.textContent = 'No person detected';
     statusDot.className = 'status-dot';
+    formBorder.className = 'form-border border-none';
   }
 
   animationId = requestAnimationFrame(detect);
