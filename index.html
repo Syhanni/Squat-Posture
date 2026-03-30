@@ -12,6 +12,56 @@
     <div class="landing-content">
       <h1>Squat Form Tracker</h1>
       <p class="subtitle">Real-time pose estimation &amp; form analysis</p>
+
+      <!-- Set/Rep Programming -->
+      <div class="program-config">
+        <h3>Workout Program</h3>
+        <div class="program-row">
+          <div class="program-field">
+            <label for="input-sets">Sets</label>
+            <div class="stepper">
+              <button class="stepper-btn" data-target="input-sets" data-dir="-1">&minus;</button>
+              <input type="number" id="input-sets" value="5" min="1" max="20">
+              <button class="stepper-btn" data-target="input-sets" data-dir="1">+</button>
+            </div>
+          </div>
+          <div class="program-field">
+            <label for="input-reps">Reps per Set</label>
+            <div class="stepper">
+              <button class="stepper-btn" data-target="input-reps" data-dir="-1">&minus;</button>
+              <input type="number" id="input-reps" value="5" min="1" max="50">
+              <button class="stepper-btn" data-target="input-reps" data-dir="1">+</button>
+            </div>
+          </div>
+          <div class="program-field">
+            <label for="input-rest">Rest (sec)</label>
+            <div class="stepper">
+              <button class="stepper-btn" data-target="input-rest" data-dir="-10">&minus;</button>
+              <input type="number" id="input-rest" value="90" min="10" max="600" step="10">
+              <button class="stepper-btn" data-target="input-rest" data-dir="10">+</button>
+            </div>
+          </div>
+        </div>
+        <div class="audio-toggle">
+          <label><input type="checkbox" id="input-audio" checked> Audio Cues</label>
+        </div>
+      </div>
+
+      <!-- Perfect Form Example -->
+      <div class="example-section">
+        <h3>Perfect Squat Form</h3>
+        <div class="example-container">
+          <canvas id="example-canvas" width="280" height="340"></canvas>
+          <div class="example-labels">
+            <div class="example-label">Chest upright</div>
+            <div class="example-label">Hips back &amp; down</div>
+            <div class="example-label">Knees track over toes</div>
+            <div class="example-label">Thighs at or below parallel</div>
+            <div class="example-label">Feet flat, shoulder width</div>
+          </div>
+        </div>
+      </div>
+
       <button id="btn-start" class="btn btn-primary btn-large">Start</button>
       <p class="hint">Opens fullscreen with camera tracking</p>
     </div>
@@ -29,7 +79,18 @@
         <span class="status-dot" id="status-dot"></span>
         <span id="status-text">Loading...</span>
       </div>
+      <div class="overlay-program-status" id="program-status">Set 1/5 &middot; Rep 0/5</div>
       <button id="btn-stop" class="btn btn-stop-overlay">Exit</button>
+    </div>
+
+    <!-- Rest timer overlay -->
+    <div id="rest-overlay" class="rest-overlay hidden">
+      <div class="rest-content">
+        <div class="rest-label">Rest Period</div>
+        <div class="rest-timer" id="rest-timer">90</div>
+        <div class="rest-sub">Next set starting soon</div>
+        <button id="btn-skip-rest" class="btn btn-secondary">Skip Rest</button>
+      </div>
     </div>
 
     <!-- Stats overlay (bottom-left) -->
@@ -49,6 +110,10 @@
       <div class="hud-stat">
         <span class="hud-label">Form</span>
         <span class="hud-value" id="form-score">--</span>
+      </div>
+      <div class="hud-stat">
+        <span class="hud-label">Injury</span>
+        <span class="hud-value" id="injury-score">--</span>
       </div>
       <div class="hud-depth">
         <div class="hud-depth-bar" id="depth-bar"></div>
@@ -70,6 +135,15 @@
       </div>
       <div id="history-list" class="history-list">
         <p class="history-empty">Complete a squat to see feedback here.</p>
+      </div>
+    </div>
+
+    <!-- Workout complete overlay -->
+    <div id="complete-overlay" class="complete-overlay hidden">
+      <div class="complete-content">
+        <h2>Workout Complete!</h2>
+        <div id="complete-summary" class="complete-summary"></div>
+        <button id="btn-finish" class="btn btn-primary">Finish</button>
       </div>
     </div>
   </div>

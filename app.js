@@ -1,3 +1,4 @@
+// ---- DOM Elements ----
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -9,6 +10,7 @@ const repCountEl = document.getElementById('rep-count');
 const kneeAngleEl = document.getElementById('knee-angle');
 const hipAngleEl = document.getElementById('hip-angle');
 const formScoreEl = document.getElementById('form-score');
+const injuryScoreEl = document.getElementById('injury-score');
 const feedbackRoll = document.getElementById('feedback-roll');
 const depthBar = document.getElementById('depth-bar');
 const formBorder = document.getElementById('form-border');
@@ -18,13 +20,21 @@ const btnHistory = document.getElementById('btn-history');
 const historyPanel = document.getElementById('history-panel');
 const btnCloseHistory = document.getElementById('btn-close-history');
 const historyList = document.getElementById('history-list');
+const programStatusEl = document.getElementById('program-status');
+const restOverlay = document.getElementById('rest-overlay');
+const restTimerEl = document.getElementById('rest-timer');
+const btnSkipRest = document.getElementById('btn-skip-rest');
+const completeOverlay = document.getElementById('complete-overlay');
+const completeSummary = document.getElementById('complete-summary');
+const btnFinish = document.getElementById('btn-finish');
+const exampleCanvas = document.getElementById('example-canvas');
 
-// Pose detection state
+// ---- Pose detection state ----
 let detector = null;
 let animationId = null;
 let stream = null;
 
-// Squat tracking state
+// ---- Squat tracking state ----
 let repCount = 0;
 let squatPhase = 'standing';
 let minKneeAngle = 180;
@@ -33,13 +43,59 @@ const HISTORY_SIZE = 10;
 
 // Per-rep feedback accumulator
 let currentRepFeedback = [];
-let repHistory = []; // Array of { rep, formRating, minDepthAngle, feedback[] }
+let currentRepInjuryFactors = [];
+let repHistory = [];
 
-// Rolling feedback log (recent items shown on screen)
+// Rolling feedback
 const MAX_ROLL_ITEMS = 8;
 let rollItems = [];
 
-// Keypoint indices for MoveNet
+// ---- Set/Rep programming ----
+let programSets = 5;
+let programReps = 5;
+let programRest = 90;
+let currentSet = 1;
+let setRepCount = 0;
+let restTimerId = null;
+let audioEnabled = true;
+
+// ---- Audio cues ----
+let lastAudioCue = '';
+let lastAudioTime = 0;
+const AUDIO_COOLDOWN = 2500; // ms between same cue
+
+function speak(text) {
+  if (!audioEnabled) return;
+  const now = Date.now();
+  if (text === lastAudioCue && now - lastAudioTime < AUDIO_COOLDOWN) return;
+  lastAudioCue = text;
+  lastAudioTime = now;
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 1.1;
+  u.pitch = 1.0;
+  u.volume = 1.0;
+  speechSynthesis.speak(u);
+}
+
+// ---- Injury risk scoring ----
+// Factors: knee cave, forward lean, knee-over-toe, depth issues, asymmetry
+// Each factor adds points. 0-2 = Low, 3-5 = Moderate, 6+ = High
+
+function computeInjuryRisk(factors) {
+  let score = 0;
+  for (const f of factors) {
+    if (f === 'knee_cave') score += 3;
+    else if (f === 'forward_lean') score += 2;
+    else if (f === 'knee_forward') score += 2;
+    else if (f === 'too_deep') score += 1;
+    else if (f === 'shallow') score += 1;
+  }
+  if (score <= 2) return { label: 'Low', level: 'low' };
+  if (score <= 5) return { label: 'Med', level: 'med' };
+  return { label: 'High', level: 'high' };
+}
+
+// ---- Keypoints ----
 const KEYPOINTS = {
   NOSE: 0,
   LEFT_SHOULDER: 5, RIGHT_SHOULDER: 6,
@@ -65,11 +121,12 @@ const SKELETON_CONNECTIONS = [
   [KEYPOINTS.RIGHT_KNEE, KEYPOINTS.RIGHT_ANKLE],
 ];
 
+// UC Berkeley colors
 const COLORS = {
-  skeleton: '#00ff88',
-  jointGood: '#00ff88',
-  jointWarn: '#ffaa00',
-  jointBad: '#ff3366',
+  skeleton: '#FDB515',
+  jointGood: '#FDB515',
+  jointWarn: '#EE8800',
+  jointBad: '#C4122F',
 };
 
 // ---- Utility ----
@@ -109,7 +166,6 @@ function renderRoll() {
 // ---- Rep history ----
 
 function saveRepHistory(formRating) {
-  // Deduplicate feedback messages for this rep
   const seen = new Set();
   const unique = currentRepFeedback.filter((f) => {
     if (seen.has(f.text)) return false;
@@ -117,18 +173,24 @@ function saveRepHistory(formRating) {
     return true;
   });
 
+  const injury = computeInjuryRisk(currentRepInjuryFactors);
+
   const entry = {
     rep: repCount,
+    set: currentSet,
     formRating,
+    injuryRisk: injury,
     minDepthAngle: Math.round(minKneeAngle),
     feedback: unique,
     time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
   };
   repHistory.push(entry);
   currentRepFeedback = [];
+  currentRepInjuryFactors = [];
   renderHistory();
 
-  addRollItem(`Rep #${repCount} complete — ${formRating}`, formRating === 'Good' ? 'good' : formRating === 'Fair' ? 'warn' : 'bad');
+  const rollType = formRating === 'Good' ? 'good' : formRating === 'Fair' ? 'warn' : 'bad';
+  addRollItem(`Rep #${setRepCount}/${programReps} — ${formRating} (Risk: ${injury.label})`, rollType);
 }
 
 function renderHistory() {
@@ -146,8 +208,9 @@ function renderHistory() {
         : '<div class="hist-fb hist-fb-good">No issues detected</div>';
       return `<div class="hist-entry hist-entry-${entry.formRating.toLowerCase()}">
         <div class="hist-header">
-          <span class="hist-rep">Rep #${entry.rep}</span>
+          <span class="hist-rep">Set ${entry.set} Rep #${entry.rep}</span>
           <span class="hist-rating hist-rating-${entry.formRating.toLowerCase()}">${entry.formRating}</span>
+          <span class="hist-injury hist-injury-${entry.injuryRisk.level}">Risk: ${entry.injuryRisk.label}</span>
           <span class="hist-time">${entry.time}</span>
         </div>
         <div class="hist-meta">Depth: ${depthLabel} (${entry.minDepthAngle}°)</div>
@@ -155,6 +218,79 @@ function renderHistory() {
       </div>`;
     })
     .join('');
+}
+
+// ---- Set/Rep management ----
+
+function updateProgramStatus() {
+  programStatusEl.textContent = `Set ${currentSet}/${programSets} \u00B7 Rep ${setRepCount}/${programReps}`;
+}
+
+function onRepCompleted() {
+  setRepCount++;
+  updateProgramStatus();
+
+  if (setRepCount >= programReps) {
+    // Set complete
+    speak(`Set ${currentSet} complete`);
+    addRollItem(`Set ${currentSet} complete!`, 'good');
+
+    if (currentSet >= programSets) {
+      // Workout done
+      showWorkoutComplete();
+      return;
+    }
+
+    // Start rest timer
+    startRestTimer();
+  } else {
+    const remaining = programReps - setRepCount;
+    if (remaining === 1) speak('One more rep');
+  }
+}
+
+function startRestTimer() {
+  let remaining = programRest;
+  restOverlay.classList.remove('hidden');
+  restTimerEl.textContent = remaining;
+
+  restTimerId = setInterval(() => {
+    remaining--;
+    restTimerEl.textContent = remaining;
+    if (remaining === 5) speak('5 seconds');
+    if (remaining <= 0) {
+      endRestTimer();
+    }
+  }, 1000);
+}
+
+function endRestTimer() {
+  if (restTimerId) { clearInterval(restTimerId); restTimerId = null; }
+  restOverlay.classList.add('hidden');
+  currentSet++;
+  setRepCount = 0;
+  updateProgramStatus();
+  speak(`Set ${currentSet}, let's go`);
+  addRollItem(`Set ${currentSet} — Ready`, 'info');
+}
+
+function showWorkoutComplete() {
+  const totalReps = repHistory.length;
+  const goodReps = repHistory.filter(r => r.formRating === 'Good').length;
+  const avgInjury = repHistory.reduce((sum, r) => {
+    const s = r.injuryRisk.level === 'low' ? 1 : r.injuryRisk.level === 'med' ? 2 : 3;
+    return sum + s;
+  }, 0) / (totalReps || 1);
+  const avgLabel = avgInjury <= 1.5 ? 'Low' : avgInjury <= 2.5 ? 'Moderate' : 'High';
+
+  completeSummary.innerHTML = `
+    <div class="cs-row"><span>Total Reps</span><span>${totalReps}</span></div>
+    <div class="cs-row"><span>Good Form</span><span>${goodReps}/${totalReps}</span></div>
+    <div class="cs-row"><span>Avg Injury Risk</span><span>${avgLabel}</span></div>
+    <div class="cs-row"><span>Sets Completed</span><span>${programSets}</span></div>
+  `;
+  completeOverlay.classList.remove('hidden');
+  speak('Workout complete. Great job!');
 }
 
 // ---- Drawing ----
@@ -181,7 +317,7 @@ function drawSkeleton(keypoints, issues) {
     ctx.arc(kp.x, kp.y, 6, 0, 2 * Math.PI);
     ctx.fillStyle = color;
     ctx.fill();
-    ctx.strokeStyle = '#000';
+    ctx.strokeStyle = '#003262';
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
@@ -199,10 +335,11 @@ function drawAngleLabel(vertex, angleDeg, label, color) {
 
 // ---- Form analysis ----
 
-let lastFormRating = 'Good'; // Track across frames for rep save
+let lastFormRating = 'Good';
 
 function analyzeForm(keypoints) {
   const feedback = [];
+  const injuryFactors = [];
   const issues = { kneeIssue: false, hipIssue: false };
   let formRating = 'Good';
 
@@ -218,7 +355,7 @@ function analyzeForm(keypoints) {
   const shoulder = useLeft ? lShoulder : rShoulder;
 
   if (!isOk(hip) || !isOk(knee) || !isOk(ankle)) {
-    return { kneeAngle: null, hipAngle: null, feedback: [], issues, formRating: '--', depth: 0 };
+    return { kneeAngle: null, hipAngle: null, feedback: [], injuryFactors: [], issues, formRating: '--', depth: 0 };
   }
 
   const kneeAngle = angle(kp2xy(hip), kp2xy(knee), kp2xy(ankle));
@@ -238,6 +375,7 @@ function analyzeForm(keypoints) {
     squatPhase = 'descending';
     minKneeAngle = avgAngle;
     currentRepFeedback = [];
+    currentRepInjuryFactors = [];
     lastFormRating = 'Good';
     addRollItem('Squat started', 'info');
   } else if (squatPhase === 'descending') {
@@ -251,6 +389,7 @@ function analyzeForm(keypoints) {
       repCount++;
       repCountEl.textContent = repCount;
       saveRepHistory(lastFormRating);
+      onRepCompleted();
     }
     squatPhase = 'standing';
     minKneeAngle = 180;
@@ -262,8 +401,10 @@ function analyzeForm(keypoints) {
     const ankleW = Math.abs(lAnkle.x - rAnkle.x);
     if (kneeW < ankleW * 0.75 && kneeAngle < 140) {
       feedback.push({ text: 'Knees caving inward — push knees out', type: 'warn' });
+      injuryFactors.push('knee_cave');
       issues.kneeIssue = true;
       formRating = 'Fair';
+      speak('Knees out');
     }
   }
 
@@ -272,16 +413,21 @@ function analyzeForm(keypoints) {
     const ref = Math.abs(hip.y - ankle.y);
     if (Math.abs(lean) > ref * 0.5) {
       feedback.push({ text: 'Excessive forward lean — chest up', type: 'warn' });
+      injuryFactors.push('forward_lean');
       issues.hipIssue = true;
       formRating = 'Fair';
+      speak('Chest up');
     }
   }
 
   if (squatPhase === 'bottom' || squatPhase === 'ascending') {
     if (minKneeAngle > 120) {
       feedback.push({ text: 'Go deeper — aim for parallel', type: 'info' });
+      injuryFactors.push('shallow');
+      speak('Go deeper');
     } else if (minKneeAngle < 70) {
       feedback.push({ text: 'Great depth — keep lower back neutral', type: 'info' });
+      injuryFactors.push('too_deep');
     }
   }
 
@@ -290,8 +436,10 @@ function analyzeForm(keypoints) {
     const shin = Math.abs(knee.y - ankle.y);
     if (Math.abs(fwd) > shin * 0.8) {
       feedback.push({ text: 'Knees too far forward — sit back more', type: 'warn' });
+      injuryFactors.push('knee_forward');
       issues.kneeIssue = true;
       if (formRating === 'Good') formRating = 'Fair';
+      speak('Sit back');
     }
   }
 
@@ -302,29 +450,25 @@ function analyzeForm(keypoints) {
   const warns = feedback.filter((f) => f.type === 'warn').length;
   if (warns >= 2) formRating = 'Poor';
 
-  // Accumulate feedback for current rep
+  // Accumulate for current rep
   if (squatPhase !== 'standing') {
     for (const f of feedback) {
-      if (f.type === 'warn' || f.type === 'info') {
-        currentRepFeedback.push(f);
-      }
+      if (f.type === 'warn' || f.type === 'info') currentRepFeedback.push(f);
     }
-    // Track worst rating for this rep
+    for (const f of injuryFactors) currentRepInjuryFactors.push(f);
     if (formRating === 'Poor') lastFormRating = 'Poor';
     else if (formRating === 'Fair' && lastFormRating !== 'Poor') lastFormRating = 'Fair';
   }
 
-  // Push new warnings to the rolling feed (throttled — only if not already the latest)
+  // Rolling feed warnings
   for (const f of feedback) {
     if (f.type === 'warn') {
       const last = rollItems[rollItems.length - 1];
-      if (!last || last.text !== f.text) {
-        addRollItem(f.text, 'warn');
-      }
+      if (!last || last.text !== f.text) addRollItem(f.text, 'warn');
     }
   }
 
-  return { kneeAngle, hipAngle, feedback, issues, formRating, depth };
+  return { kneeAngle, hipAngle, feedback, injuryFactors, issues, formRating, depth };
 }
 
 // ---- Main loop ----
@@ -335,17 +479,14 @@ async function detect() {
     return;
   }
 
-  // Resize canvas to fill screen
   if (canvas.width !== window.innerWidth || canvas.height !== window.innerHeight) {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
   }
 
   const poses = await detector.estimatePoses(video);
-
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Draw video scaled to fill canvas (cover)
   const vw = video.videoWidth, vh = video.videoHeight;
   const cw = canvas.width, ch = canvas.height;
   const scale = Math.max(cw / vw, ch / vh);
@@ -355,11 +496,9 @@ async function detect() {
 
   if (poses.length > 0) {
     const keypoints = poses[0].keypoints;
-    const sx = scale;
-    const sy = scale;
     for (const kp of keypoints) {
-      kp.x = kp.x * sx + ox;
-      kp.y = kp.y * sy + oy;
+      kp.x = kp.x * scale + ox;
+      kp.y = kp.y * scale + oy;
     }
 
     const analysis = analyzeForm(keypoints);
@@ -373,18 +512,23 @@ async function detect() {
     const shoulder = keypoints[useLeft ? KEYPOINTS.LEFT_SHOULDER : KEYPOINTS.RIGHT_SHOULDER];
 
     if (analysis.kneeAngle !== null) {
-      drawAngleLabel(kp2xy(knee), analysis.kneeAngle, 'Knee', '#00ff88');
+      drawAngleLabel(kp2xy(knee), analysis.kneeAngle, 'Knee', '#FDB515');
       kneeAngleEl.textContent = `${Math.round(analysis.kneeAngle)}°`;
     }
     if (analysis.hipAngle !== null) {
-      drawAngleLabel(kp2xy(hip), analysis.hipAngle, 'Hip', '#44aaff');
+      drawAngleLabel(kp2xy(hip), analysis.hipAngle, 'Hip', '#3B7EA1');
       hipAngleEl.textContent = `${Math.round(analysis.hipAngle)}°`;
     }
 
     formScoreEl.textContent = analysis.formRating;
     formScoreEl.className = 'hud-value form-' + analysis.formRating.toLowerCase();
 
-    // Update form indicator border
+    // Injury risk display
+    const injury = computeInjuryRisk(analysis.injuryFactors);
+    injuryScoreEl.textContent = injury.label;
+    injuryScoreEl.className = 'hud-value injury-' + injury.level;
+
+    // Border
     const borderMap = { Good: 'border-good', Fair: 'border-fair', Poor: 'border-poor' };
     formBorder.className = 'form-border ' + (borderMap[analysis.formRating] || 'border-none');
 
@@ -404,7 +548,7 @@ async function detect() {
   animationId = requestAnimationFrame(detect);
 }
 
-// ---- Fullscreen helpers ----
+// ---- Fullscreen ----
 
 function enterFullscreen() {
   const el = document.documentElement;
@@ -430,9 +574,19 @@ async function initDetector() {
 
 async function startSession() {
   try {
-    // Switch to tracker view
+    // Read program config
+    programSets = parseInt(document.getElementById('input-sets').value) || 5;
+    programReps = parseInt(document.getElementById('input-reps').value) || 5;
+    programRest = parseInt(document.getElementById('input-rest').value) || 90;
+    audioEnabled = document.getElementById('input-audio').checked;
+    currentSet = 1;
+    setRepCount = 0;
+
     landing.classList.add('hidden');
     tracker.classList.remove('hidden');
+    completeOverlay.classList.add('hidden');
+    restOverlay.classList.add('hidden');
+    updateProgramStatus();
 
     enterFullscreen();
 
@@ -452,6 +606,8 @@ async function startSession() {
     statusText.textContent = 'Tracking';
     statusDot.className = 'status-dot active';
     animationId = requestAnimationFrame(detect);
+
+    if (audioEnabled) speak(`${programSets} sets of ${programReps}. Let's go.`);
   } catch (err) {
     statusText.textContent = `Error: ${err.message}`;
     console.error(err);
@@ -460,21 +616,23 @@ async function startSession() {
 
 function stopSession() {
   if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
+  if (restTimerId) { clearInterval(restTimerId); restTimerId = null; }
   if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
   video.srcObject = null;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  speechSynthesis.cancel();
 
   exitFullscreen();
 
   tracker.classList.add('hidden');
   landing.classList.remove('hidden');
 
-  // Reset state
   repCount = 0;
   squatPhase = 'standing';
   minKneeAngle = 180;
   frameHistory = [];
   currentRepFeedback = [];
+  currentRepInjuryFactors = [];
   repHistory = [];
   rollItems = [];
   lastFormRating = 'Good';
@@ -482,25 +640,141 @@ function stopSession() {
   kneeAngleEl.textContent = '--°';
   hipAngleEl.textContent = '--°';
   formScoreEl.textContent = '--';
+  injuryScoreEl.textContent = '--';
   feedbackRoll.innerHTML = '';
   historyList.innerHTML = '<p class="history-empty">Complete a squat to see feedback here.</p>';
 }
 
-// Also stop if user exits fullscreen manually
-document.addEventListener('fullscreenchange', () => {
-  if (!document.fullscreenElement && tracker.classList.contains('hidden') === false) {
-    // User exited fullscreen — keep tracking but don't force back
+document.addEventListener('fullscreenchange', () => {});
+
+// ---- Perfect form skeleton animation on landing ----
+
+function drawExampleSkeleton() {
+  const c = exampleCanvas;
+  const x = c.getContext('2d');
+  const W = c.width, H = c.height;
+  let t = 0;
+
+  function lerp(a, b, p) { return a + (b - a) * p; }
+
+  // Standing pose keypoints (x, y) normalized
+  const stand = {
+    head: [140, 30],
+    neck: [140, 55],
+    lShoulder: [105, 60], rShoulder: [175, 60],
+    lElbow: [85, 100], rElbow: [195, 100],
+    lWrist: [80, 130], rWrist: [200, 130],
+    lHip: [118, 145], rHip: [162, 145],
+    lKnee: [115, 215], rKnee: [165, 215],
+    lAnkle: [112, 290], rAnkle: [168, 290],
+  };
+
+  // Bottom squat pose
+  const squat = {
+    head: [140, 85],
+    neck: [140, 110],
+    lShoulder: [105, 115], rShoulder: [175, 115],
+    lElbow: [80, 140], rElbow: [200, 140],
+    lWrist: [75, 170], rWrist: [205, 170],
+    lHip: [110, 195], rHip: [170, 195],
+    lKnee: [90, 248], rKnee: [190, 248],
+    lAnkle: [100, 300], rAnkle: [180, 300],
+  };
+
+  const bones = [
+    ['lShoulder', 'rShoulder'],
+    ['lShoulder', 'lElbow'], ['lElbow', 'lWrist'],
+    ['rShoulder', 'rElbow'], ['rElbow', 'rWrist'],
+    ['neck', 'lShoulder'], ['neck', 'rShoulder'],
+    ['lHip', 'rHip'],
+    ['lShoulder', 'lHip'], ['rShoulder', 'rHip'],
+    ['lHip', 'lKnee'], ['lKnee', 'lAnkle'],
+    ['rHip', 'rKnee'], ['rKnee', 'rAnkle'],
+  ];
+
+  function drawFrame() {
+    x.clearRect(0, 0, W, H);
+
+    // Smooth cycle: stand -> squat -> stand
+    t += 0.008;
+    const cycle = (Math.sin(t * Math.PI * 2) + 1) / 2; // 0..1..0
+
+    const pose = {};
+    for (const key of Object.keys(stand)) {
+      pose[key] = [
+        lerp(stand[key][0], squat[key][0], cycle),
+        lerp(stand[key][1], squat[key][1], cycle),
+      ];
+    }
+
+    // Draw bones
+    x.strokeStyle = '#FDB515';
+    x.lineWidth = 3;
+    x.lineCap = 'round';
+    for (const [a, b] of bones) {
+      x.beginPath();
+      x.moveTo(pose[a][0], pose[a][1]);
+      x.lineTo(pose[b][0], pose[b][1]);
+      x.stroke();
+    }
+
+    // Draw joints
+    for (const key of Object.keys(pose)) {
+      x.beginPath();
+      x.arc(pose[key][0], pose[key][1], 5, 0, Math.PI * 2);
+      x.fillStyle = '#FDB515';
+      x.fill();
+      x.strokeStyle = '#003262';
+      x.lineWidth = 1.5;
+      x.stroke();
+    }
+
+    // Draw head circle
+    x.beginPath();
+    x.arc(pose.head[0], pose.head[1], 14, 0, Math.PI * 2);
+    x.fillStyle = 'rgba(253, 181, 21, 0.3)';
+    x.fill();
+    x.strokeStyle = '#FDB515';
+    x.lineWidth = 2;
+    x.stroke();
+
+    // Angle labels
+    const kneeAngle = angle(
+      { x: pose.lHip[0], y: pose.lHip[1] },
+      { x: pose.lKnee[0], y: pose.lKnee[1] },
+      { x: pose.lAnkle[0], y: pose.lAnkle[1] }
+    );
+    x.font = 'bold 11px monospace';
+    x.fillStyle = '#FDB515';
+    x.fillText(`${Math.round(kneeAngle)}°`, pose.lKnee[0] - 35, pose.lKnee[1] + 5);
+
+    requestAnimationFrame(drawFrame);
   }
+
+  drawFrame();
+}
+
+// ---- Stepper buttons ----
+
+document.querySelectorAll('.stepper-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const input = document.getElementById(btn.dataset.target);
+    const dir = parseInt(btn.dataset.dir);
+    let val = parseInt(input.value) + dir;
+    val = Math.max(parseInt(input.min), Math.min(parseInt(input.max), val));
+    input.value = val;
+  });
 });
 
 // ---- Event listeners ----
 
 btnStart.addEventListener('click', startSession);
 btnStop.addEventListener('click', stopSession);
+btnSkipRest.addEventListener('click', endRestTimer);
+btnFinish.addEventListener('click', stopSession);
 
-btnHistory.addEventListener('click', () => {
-  historyPanel.classList.toggle('hidden');
-});
-btnCloseHistory.addEventListener('click', () => {
-  historyPanel.classList.add('hidden');
-});
+btnHistory.addEventListener('click', () => historyPanel.classList.toggle('hidden'));
+btnCloseHistory.addEventListener('click', () => historyPanel.classList.add('hidden'));
+
+// Start example animation on load
+drawExampleSkeleton();
