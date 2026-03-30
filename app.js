@@ -564,6 +564,9 @@ function exitFullscreen() {
 // ---- Camera & model ----
 
 async function initDetector() {
+  if (typeof poseDetection === 'undefined') {
+    throw new Error('Pose detection library failed to load. Check your internet connection.');
+  }
   statusText.textContent = 'Loading AI model...';
   const model = poseDetection.SupportedModels.MoveNet;
   detector = await poseDetection.createDetector(model, {
@@ -584,6 +587,7 @@ async function startSession() {
 
     landing.classList.add('hidden');
     tracker.classList.remove('hidden');
+    document.body.classList.add('tracking');
     completeOverlay.classList.add('hidden');
     restOverlay.classList.add('hidden');
     updateProgramStatus();
@@ -609,8 +613,13 @@ async function startSession() {
 
     if (audioEnabled) speak(`${programSets} sets of ${programReps}. Let's go.`);
   } catch (err) {
-    statusText.textContent = `Error: ${err.message}`;
     console.error(err);
+    // Revert to landing so user isn't stuck on a blank screen
+    if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+    tracker.classList.add('hidden');
+    landing.classList.remove('hidden');
+    document.body.classList.remove('tracking');
+    alert('Failed to start: ' + err.message);
   }
 }
 
@@ -626,6 +635,7 @@ function stopSession() {
 
   tracker.classList.add('hidden');
   landing.classList.remove('hidden');
+  document.body.classList.remove('tracking');
 
   repCount = 0;
   squatPhase = 'standing';

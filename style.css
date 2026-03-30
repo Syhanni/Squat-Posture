@@ -10,9 +10,12 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background: #001220;
   color: #e0e0e0;
-  overflow: hidden;
-  height: 100vh;
+  min-height: 100vh;
   width: 100vw;
+}
+
+body.tracking {
+  overflow: hidden;
 }
 
 .hidden { display: none !important; }
@@ -20,12 +23,11 @@ body {
 /* ===== Landing screen ===== */
 #landing {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   min-height: 100vh;
-  overflow-y: auto;
   background: radial-gradient(ellipse at center, #002040 0%, #001220 70%);
-  padding: 40px 20px;
+  padding: 60px 20px;
 }
 
 .landing-content {
